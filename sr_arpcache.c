@@ -21,21 +21,22 @@ void sr_arpcache_sweepreqs(struct sr_instance *sr) {
     /* Fill this in 5 times ARP -> */
     struct sr_arpreq * cachedRequests = sr->cache.requests;
     while(cachedRequests != NULL){
-        if(cachedRequests->times_sent >= 5){ 
-            /* 5 ARP requests sent to the server already */
-            cachedRequests->times_sent = 0;
-            struct sr_packet * packet = cachedRequests->packets;
-            while(packet != NULL){
-                /* destination host unreachable error for each packet in queue */
-                ipError(sr, packet->buf, packet->len, packet->iface, 3, 1);
-                packet = packet->next;
+        if(difftime(time(NULL), cachedRequests->sent) >= 1.0 || cachedRequests->sent == 0){
+            if(cachedRequests->times_sent >= 5){ 
+                /* 5 ARP requests sent to the server already */
+                cachedRequests->times_sent = 0;
+                struct sr_packet * packet = cachedRequests->packets;
+                while(packet != NULL){
+                    /* destination host unreachable error for each packet in queue */
+                    ipError(sr, packet->buf, packet->len, packet->iface, 3, 1);
+                    packet = packet->next;
+                }
+                sr_arpreq_destroy(&(sr->cache), cachedRequests);
+            }else{
+                sendARPRequest(sr, cachedRequests->ip);
+                cachedRequests->times_sent++;
+                cachedRequests->sent = time(NULL);
             }
-            sr_arpreq_destroy(&(sr->cache), cachedRequests);
-        }else{
-            cachedRequests->times_sent++;
-            /* printf("incrementing...\n"); */
-            /* resending ARP each second to get MAC address */
-            sendARPRequest(sr, cachedRequests->ip);
         }
         cachedRequests = cachedRequests->next;
     }

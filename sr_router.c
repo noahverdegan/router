@@ -77,34 +77,28 @@ void sendArpReply(struct sr_instance* sr, uint8_t * packet, unsigned int len, ch
 }
 
 void sendOutStandingPct(struct sr_instance* sr, uint8_t * packet, unsigned int len, char* interface){
-  unsigned char mac[6] = "000000";
   sr_arp_hdr_t * arpHdr = (sr_arp_hdr_t *)(packet + sizeof(sr_ethernet_hdr_t));
   struct sr_if * ifRecord = sr_get_interface(sr, interface);
 
   /* if (((unsigned long)ntohl(arpHdr->ar_sip)) == 2889876234) return; */
   /* Get packet queue to the destined dst ip */
-  struct sr_arpreq * queue = sr_arpcache_insert(&(sr->cache), mac, ntohl(arpHdr->ar_sip));
-
-  if(queue == NULL){
-    /* Error Case: Get ARP response, but didn't send ARP request/no queued packet */
-    /* printf("NO packet for ip\n");
-    print_addr_ip_int(ntohl(arpHdr->ar_sip)); */
-    return;
-  }
+  struct sr_arpreq * queue = sr_arpcache_insert(&(sr->cache), arpHdr->ar_sha, ntohl(arpHdr->ar_sip));
 
   /* Send all the packets in the queue to the destination */
-  struct sr_packet * packetInQueue = queue->packets;
-  while(packetInQueue != NULL){
-    /* Change dst MAC address */
-    memcpy(((sr_ethernet_hdr_t *)(packetInQueue->buf))->ether_dhost, ((sr_ethernet_hdr_t *)packet)->ether_shost, ETHER_ADDR_LEN * sizeof(uint8_t));
-    /*printf("---- Forwarded Packet ---- %s\n", ifRecord->name);
-    print_hdrs(packetInQueue->buf, len);*/
-    sr_send_packet(sr, packetInQueue->buf, packetInQueue->len, ifRecord->name);
-    packetInQueue = packetInQueue->next;
+  if(queue != NULL){
+    struct sr_packet * packetInQueue = queue->packets;
+    while(packetInQueue != NULL){
+      /* Change dst MAC address */
+      memcpy(((sr_ethernet_hdr_t *)(packetInQueue->buf))->ether_dhost, ((sr_ethernet_hdr_t *)packet)->ether_shost, ETHER_ADDR_LEN * sizeof(uint8_t));
+      /*printf("---- Forwarded Packet ---- %s\n", ifRecord->name);
+      print_hdrs(packetInQueue->buf, len);*/
+      sr_send_packet(sr, packetInQueue->buf, packetInQueue->len, ifRecord->name);
+      packetInQueue = packetInQueue->next;
+    }
+    
+    /* Free packets */
+    sr_arpreq_destroy(&(sr->cache), queue);
   }
-  
-  /* Free packets */
-  sr_arpreq_destroy(&(sr->cache), queue);
 }
 
 int checkIPToMe(struct sr_instance* sr, uint32_t ip){
@@ -197,13 +191,14 @@ void ipError(struct sr_instance* sr, uint8_t * packet, unsigned int len, char* i
   memcpy(&(ipHdr->ip_dst), &(ipHdr->ip_src), sizeof(uint32_t));
   memcpy(&(ipHdr->ip_src), &ethip, sizeof(uint32_t));
   ipHdr->ip_sum = 0;
+  ipHdr->ip_p = 1;
   ipHdr->ip_len = htons(sizeof(sr_ip_hdr_t) + sizeof(sr_icmp_t11_hdr_t));
   uint16_t checksum = cksum(ipHdr, sizeof(sr_ip_hdr_t)); 
   memcpy(&(ipHdr->ip_sum), &checksum, sizeof(uint16_t));
   
   /* 3. Update ICMP Header */
   /* ICMP Type: 11 (Code 0 - time exceeded), 3 (Code 0 - net unreachable, 1 - host unreachable)*/
-  if(code != 0) code = 1;
+  
   uint16_t zero = 0;
   memcpy(&(icmp_hdr->icmp_sum), &zero, sizeof(uint16_t));
   memcpy(&(icmp_hdr->icmp_type), &icmpType, sizeof(uint8_t));
@@ -221,14 +216,28 @@ void ipError(struct sr_instance* sr, uint8_t * packet, unsigned int len, char* i
 struct sr_rt* matchRoutingTable(struct sr_instance* sr, uint32_t dstAddr){
   struct sr_rt* rtEntry = sr->routing_table;
 
-  /* Find an entry with dst addr == dstAddr */
+  /*This is exact matching
+    //  Find an entry with dst addr == dstAddr 
+    // while(rtEntry != NULL){
+    //   if(rtEntry->dest.s_addr == dstAddr) 
+    //     return rtEntry;
+    //   rtEntry = rtEntry->next;
+    // }
+  */
+
+  /*LPM*/
+  struct sr_rt* match = NULL;
   while(rtEntry != NULL){
-    if(rtEntry->dest.s_addr == dstAddr) 
-      return rtEntry;
+    if((rtEntry->dest.s_addr & rtEntry->mask.s_addr) == (dstAddr & rtEntry->mask.s_addr)) {
+      if(match == NULL) {
+        match = rtEntry;
+      } else if(rtEntry->mask.s_addr > match->mask.s_addr){
+        match = rtEntry;
+      }
+    }
     rtEntry = rtEntry->next;
   }
-  
-  return NULL;
+  return match;
 }
 
 void sendARPRequest(struct sr_instance* sr, uint32_t dstip){
@@ -294,12 +303,13 @@ void queuePacket(struct sr_instance* sr, uint8_t * packet, unsigned int len, cha
   /* Queue Packet */
   struct sr_arpreq * queue = sr_arpcache_queuereq(&(sr->cache), ntohl(ipHdr->ip_dst), packet, len, interface);
 
-  /* Send first ARP Request */
-  /* printf("incrementing...\n"); */
+  /* Send first ARP Request 
+  /* printf("incrementing...\n"); 
   if(queue->times_sent == 0){
     queue->times_sent ++;
     sendARPRequest(sr, ntohl(ipHdr->ip_dst));
-  }
+    
+  }*/
 }
 
 /*---------------------------------------------------------------------
@@ -360,6 +370,8 @@ void sr_handlepacket(struct sr_instance* sr,
       if(((sr_ip_hdr_t *)networklayerPacket)->ip_p == ip_protocol_icmp){
         /* ICMP packet */
         sendICMPReply(sr, packet, len, interface);
+      } else if(((sr_ip_hdr_t *)networklayerPacket)->ip_p == 6 || ((sr_ip_hdr_t *)networklayerPacket)->ip_p == 17){
+        ipError(sr, packet, len, interface, 3, 3);
       }
     }else{
       /* 2. Not Directed to Me */
@@ -371,7 +383,21 @@ void sr_handlepacket(struct sr_instance* sr,
         struct sr_rt* rtEntry = matchRoutingTable(sr, ((sr_ip_hdr_t *)networklayerPacket)->ip_dst);
         if(rtEntry != NULL){
           /* Match in Routing Table */
-          queuePacket(sr, packet, len, interface, rtEntry);
+          struct sr_arpentry * entry = sr_arpcache_lookup(&(sr->cache), ntohl(rtEntry->gw.s_addr));
+          if(entry != NULL){
+            struct sr_if * ifRecord = sr_get_interface(sr, rtEntry->interface);
+            uint8_t * ethhost = (uint8_t *)(ifRecord->addr);
+            sr_ip_hdr_t * ipHdr = (sr_ip_hdr_t *)(packet + sizeof(sr_ethernet_hdr_t));
+            ipHdr->ip_ttl = ipHdr->ip_ttl - 1;
+            uint16_t checksum = cksum(ipHdr, sizeof(sr_ip_hdr_t)); 
+            memcpy(&(ipHdr->ip_sum), &checksum, sizeof(uint16_t));
+            memcpy(((sr_ethernet_hdr_t*) packet)->ether_dhost, entry->mac, ETHER_ADDR_LEN * sizeof(u_int8_t));
+            memcpy(((sr_ethernet_hdr_t*) packet)->ether_shost, ethhost, ETHER_ADDR_LEN * sizeof(uint8_t));
+            sr_send_packet(sr, packet, len, ifRecord->name);
+            free(entry);
+          }else{
+            queuePacket(sr, packet, len, interface, rtEntry);
+          }
         }else{
           /* No Match in Routing Table */
           ipError(sr, packet, len, interface, 3, 0);
