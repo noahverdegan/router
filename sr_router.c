@@ -183,7 +183,7 @@ void ipError(struct sr_instance* sr, uint8_t * packet, unsigned int len, char* i
   uint32_t ethip = ifRecord->ip;
 
   /* 1. Update Ethernet Header */
-  if(code == 0) memcpy(ethernetHdr->ether_dhost, ethernetHdr->ether_shost, ETHER_ADDR_LEN * sizeof(uint8_t));
+  if(code == 0 || code == 3) memcpy(ethernetHdr->ether_dhost, ethernetHdr->ether_shost, ETHER_ADDR_LEN * sizeof(uint8_t));
   memcpy(ethernetHdr->ether_shost, ethhost, ETHER_ADDR_LEN * sizeof(uint8_t));
   memcpy(icmp_hdr->data, ipHdr, sizeof(sr_ip_hdr_t) + 8);
 
